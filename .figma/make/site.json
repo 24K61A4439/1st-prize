@@ -1,0 +1,11 @@
+{
+  "title": "falcon ai",
+  "description": "Real-time scam call detection analyzes spoken content to protect elderly users in India from fraud by alerting them and their families instantly.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
