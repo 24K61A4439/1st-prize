@@ -1,5 +1,8 @@
 import { accountApi } from "./api"
 import { supabase } from "./supabase"
+import { DEMO_OTP_CODE, DEMO_OTP_MODE } from "@/config"
+
+const DEMO_PHONE_SESSION_KEY = "falcon-demo-phone-hash"
 
 export interface AuthCredentials {
   email: string
@@ -110,16 +113,61 @@ async function hashPhone(digits10: string): Promise<string> {
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("")
 }
 
-export async function sendPhoneOtp(phone: string): Promise<{
+async function getAuthorizedPhoneHash(phone: string): Promise<string | null> {
+  const digits = phone.replace(/\D/g, "")
+  const digits10 =
+    digits.length === 10
+      ? digits
+      : digits.length === 12 && digits.startsWith("91")
+        ? digits.slice(2)
+        : ""
+
+  if (!digits10) return null
+  const hash = await hashPhone(digits10)
+  return isAuthorizedPhoneHash(hash) ? hash : null
+}
+
+export function clearDemoPhoneSession(): void {
+  if (DEMO_OTP_MODE) sessionStorage.removeItem(DEMO_PHONE_SESSION_KEY)
+}
+
+async function isAuthorizedPhone(phone: string): Promise<boolean> {
+  return (await getAuthorizedPhoneHash(phone)) !== null
+}
+
+export async function sendPhoneOtp(
+  phone: string,
+): Promise<{
   ok: boolean
   message: string
   providerDisabled?: boolean
+  demoOtp?: string
 }> {
   const formatted = formatPhone(phone)
-  if (formatted.replace(/\D/g, "").length < 10) {
+  const digits = phone.replace(/\D/g, "")
+  if (
+    digits.length !== 10 &&
+    !(digits.length === 12 && digits.startsWith("91"))
+  ) {
     return {
       ok: false,
       message: "Please enter a valid 10-digit mobile phone number.",
+    }
+  }
+
+  if (!(await isAuthorizedPhone(phone))) {
+    return {
+      ok: false,
+      message:
+        "Only authorized team phone numbers can request an OTP for live calls.",
+    }
+  }
+
+  if (DEMO_OTP_MODE) {
+    return {
+      ok: true,
+      message: "Local demo OTP ready. No SMS was sent.",
+      demoOtp: DEMO_OTP_CODE,
     }
   }
 
@@ -147,14 +195,12 @@ export async function sendPhoneOtp(phone: string): Promise<{
 
   return {
     ok: true,
-    message: "SMS OTP sent successfully. Please check your mobile phone.",
+    message:
+      "Supabase accepted the OTP request, but SMS delivery is not confirmed. Check your phone and SMS provider delivery logs.",
   }
 }
 
-export async function verifyPhoneOtp(
-  phone: string,
-  token: string,
-): Promise<{
+export async function verifyPhoneOtp(phone: string, token: string): Promise<{
   ok: boolean
   message: string
   authorized?: boolean
@@ -163,6 +209,34 @@ export async function verifyPhoneOtp(
   userId?: string
   phoneHash?: string
 }> {
+  if (DEMO_OTP_MODE) {
+    const phoneHash = await getAuthorizedPhoneHash(phone)
+    if (!phoneHash) {
+      return {
+        ok: true,
+        authorized: false,
+        message: "Phone number is not authorized for demo call access.",
+      }
+    }
+    if (token.trim() !== DEMO_OTP_CODE) {
+      return {
+        ok: false,
+        message: "Incorrect demo code. Enter the demo OTP shown above.",
+      }
+    }
+
+    sessionStorage.setItem(DEMO_PHONE_SESSION_KEY, phoneHash)
+    const digits10 = phone.replace(/\D/g, "").slice(-10)
+    return {
+      ok: true,
+      authorized: true,
+      message: "Demo phone verified. Call access unlocked.",
+      phoneMasked: `+XX-XXXXXX${digits10.slice(-4)}`,
+      userId: `demo-${phoneHash.slice(0, 12)}`,
+      phoneHash,
+    }
+  }
+
   const formatted = formatPhone(phone)
 
   const { data, error } = await supabase.auth.verifyOtp({
@@ -174,7 +248,8 @@ export async function verifyPhoneOtp(
   if (error || !data.session) {
     return {
       ok: false,
-      message: error?.message || "Invalid or expired OTP token. Please try again.",
+      message:
+        error?.message || "Invalid or expired OTP token. Please try again.",
     }
   }
 
@@ -199,13 +274,27 @@ export async function verifyPhoneOtp(
   }
 }
 
-export async function checkPhoneCallAuthorization(userParam?: any): Promise<{
+export async function checkPhoneCallAuthorization(
+  userParam?: any,
+): Promise<{
   authorized: boolean
   error?: string
   phoneMasked?: string
   userId?: string
   phoneHash?: string
 }> {
+  if (DEMO_OTP_MODE) {
+    const demoPhoneHash = sessionStorage.getItem(DEMO_PHONE_SESSION_KEY)
+    if (demoPhoneHash && isAuthorizedPhoneHash(demoPhoneHash)) {
+      return {
+        authorized: true,
+        userId: `demo-${demoPhoneHash.slice(0, 12)}`,
+        phoneHash: demoPhoneHash,
+        phoneMasked: "Verified Demo Team Member",
+      }
+    }
+  }
+
   let user = userParam
   if (!user) {
     const { data } = await supabase.auth.getUser()
@@ -257,5 +346,3 @@ export async function checkPhoneCallAuthorization(userParam?: any): Promise<{
     phoneMasked: `+XX-XXXXXX${digits10.slice(-4)}`,
   }
 }
-
-

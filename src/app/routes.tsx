@@ -1,9 +1,9 @@
 import { createBrowserRouter, Navigate, redirect } from "react-router"
 import AppShell from "@/components/layout/AppShell"
-import { DEMO_MODE } from "@/config"
+import { DEMO_MODE, DEMO_OTP_MODE } from "@/config"
 import { CallAnalysisProvider } from "@/context/CallAnalysisContext"
 import LoginPage from "@/features/auth/LoginPage"
-import { getSession } from "@/lib/auth"
+import { checkPhoneCallAuthorization, getSession } from "@/lib/auth"
 import HomePage from "@/pages/HomePage"
 import LivePage from "@/pages/LivePage"
 import ProfilePage from "@/pages/ProfilePage"
@@ -19,6 +19,11 @@ function ProtectedApp() {
 
 async function requireSession() {
   if (DEMO_MODE) return null
+  if (DEMO_OTP_MODE) {
+    const demoAuth = await checkPhoneCallAuthorization()
+    if (demoAuth.authorized) return null
+    throw redirect("/login")
+  }
   const session = await getSession()
   if (!session) throw redirect("/login")
   return session

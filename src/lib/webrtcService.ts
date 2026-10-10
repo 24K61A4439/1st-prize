@@ -137,23 +137,37 @@ export class WebRtcCallSession {
   private setupPeerConnection() {
     const iceServers: RTCIceServer[] = [
       { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" },
-      { urls: "stun:stun2.l.google.com:19302" },
+      { urls: "stun:stun.cloudflare.com:3478" },
     ]
 
-    const turnUrl = import.meta.env.VITE_TURN_URL
+    const turnUrls = (
+      import.meta.env.VITE_TURN_URLS || import.meta.env.VITE_TURN_URL || ""
+    )
+      .split(",")
+      .map((url) => url.trim())
+      .filter(Boolean)
     const turnUsername = import.meta.env.VITE_TURN_USERNAME
     const turnCredential = import.meta.env.VITE_TURN_CREDENTIAL
 
-    if (turnUrl) {
-      iceServers.push({
-        urls: turnUrl,
-        username: turnUsername,
-        credential: turnCredential,
-      })
+    if (turnUrls.length > 0 && (!turnUsername || !turnCredential)) {
+      this.callbacks.onError(
+        "TURN URLs are configured without credentials. Add VITE_TURN_USERNAME and VITE_TURN_CREDENTIAL in the deployment settings.",
+      )
+    } else {
+      for (const url of turnUrls) {
+        iceServers.push({
+          urls: url,
+          username: turnUsername,
+          credential: turnCredential,
+        })
+      }
     }
 
-    this.pc = new RTCPeerConnection({ iceServers })
+    this.pc = new RTCPeerConnection({
+      iceServers,
+      iceCandidatePoolSize: 10,
+      bundlePolicy: "max-bundle",
+    })
 
     // Add local tracks to RTCPeerConnection
     if (this.localStream) {
@@ -195,6 +209,9 @@ export class WebRtcCallSession {
       } else if (state === "disconnected") {
         this.callbacks.onStatusChange("disconnected")
       } else if (state === "failed") {
+        this.callbacks.onError(
+          "Peer connection failed. Confirm both phones joined the same room; restrictive networks may require a TURN relay.",
+        )
         this.callbacks.onStatusChange("failed")
       } else if (state === "closed") {
         this.callbacks.onStatusChange("ended")
@@ -207,6 +224,9 @@ export class WebRtcCallSession {
       if (iceState === "connected" || iceState === "completed") {
         this.callbacks.onStatusChange("connected")
       } else if (iceState === "failed") {
+        this.callbacks.onError(
+          "No media route could be found. Same-Wi-Fi may work; otherwise configure TURN relay credentials and retry.",
+        )
         this.callbacks.onStatusChange("failed")
       } else if (iceState === "disconnected") {
         this.callbacks.onStatusChange("disconnected")
@@ -251,8 +271,9 @@ export class WebRtcCallSession {
           type: "presence-join",
           from: this.clientId,
         })
-      } else if (status === "CHANNEL_ERROR") {
+      } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
         this.callbacks.onError("Signalling channel error. Check internet connection.")
+        this.callbacks.onStatusChange("failed")
       }
     })
   }
@@ -378,11 +399,26 @@ export class WebRtcCallSession {
           timestamp: Date.now(),
         },
       }
-      this.channel.send({
-        type: "broadcast",
-        event: "signal",
-        payload: securedPayload,
-      })
+      void this.channel
+        .send({
+          type: "broadcast",
+          event: "signal",
+          payload: securedPayload,
+        })
+        .then((result) => {
+          if (result !== "ok") {
+            this.callbacks.onError(
+              "Call signaling could not be delivered. Check your connection and rejoin the room.",
+            )
+          }
+        })
+        .catch((error: unknown) => {
+          this.callbacks.onError(
+            error instanceof Error
+              ? `Call signaling failed: ${error.message}`
+              : "Call signaling failed. Check your internet connection.",
+          )
+        })
     }
   }
 

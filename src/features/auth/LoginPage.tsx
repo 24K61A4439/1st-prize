@@ -15,7 +15,7 @@ import { useNavigate } from "react-router"
 import VideoBackground from "@/components/VideoBackground"
 import Button from "@/components/ui/Button"
 import PhoenixMark from "@/components/ui/PhoenixMark"
-import { APP_NAME, DEMO_MODE } from "@/config"
+import { APP_NAME, DEMO_MODE, DEMO_OTP_MODE } from "@/config"
 import {
   resetPassword,
   sendPhoneOtp,
@@ -47,6 +47,7 @@ export default function LoginPage() {
   const [phoneSuccess, setPhoneSuccess] = useState("")
   const [providerDisabled, setProviderDisabled] = useState(false)
   const [resendTimer, setResendTimer] = useState(0)
+  const [demoOtpCode, setDemoOtpCode] = useState("")
 
   // Resend OTP countdown timer
   useEffect(() => {
@@ -111,7 +112,8 @@ export default function LoginPage() {
 
     if (res.ok) {
       setPhoneStage("otp")
-      setPhoneSuccess("SMS OTP sent! Check your phone.")
+      setDemoOtpCode(res.demoOtp || "")
+      setPhoneSuccess(res.message)
       setResendTimer(45)
     } else {
       setPhoneError(res.message)
@@ -185,9 +187,12 @@ export default function LoginPage() {
         </section>
 
         <section className="login-card" aria-labelledby="login-title">
-          {DEMO_MODE && (
+          {(DEMO_MODE || DEMO_OTP_MODE) && (
             <div className="demo-banner">
-              <span>Demo mode</span> No real account is required
+              <span>Demo mode</span>
+              {DEMO_OTP_MODE
+                ? "Local demo OTP only; no SMS will be sent."
+                : "No real account is required"}
             </div>
           )}
           <h2 id="login-title">
@@ -199,7 +204,9 @@ export default function LoginPage() {
           </h2>
           <p className="login-intro">
             {authMethod === "phone"
-              ? "Authorized team members must verify via SMS OTP."
+              ? DEMO_OTP_MODE
+                ? "Use either authorized team number and the displayed local demo code."
+                : "Authorized team members must verify via SMS OTP."
               : "Stay protected during suspicious calls."}
           </p>
 
@@ -238,7 +245,8 @@ export default function LoginPage() {
                 transition: "all 150ms",
               }}
             >
-              <Smartphone style={{ width: 15, height: 15 }} /> Phone OTP
+              <Smartphone style={{ width: 15, height: 15 }} />{" "}
+              {DEMO_OTP_MODE ? "Demo Phone Code" : "Phone OTP"}
             </button>
             <button
               type="button"
@@ -386,7 +394,11 @@ export default function LoginPage() {
                   style={{ marginTop: 18 }}
                   disabled={phoneLoading}
                 >
-                  {phoneLoading ? "Sending SMS OTP..." : "Send SMS OTP"}
+                  {phoneLoading
+                    ? "Preparing..."
+                    : DEMO_OTP_MODE
+                      ? "Show Demo OTP"
+                      : "Send SMS OTP"}
                 </Button>
               </form>
             ) : (
@@ -401,7 +413,11 @@ export default function LoginPage() {
                     marginBottom: 10,
                   }}
                 >
-                  <span>Code sent to +91 {phone}</span>
+                  <span>
+                    {DEMO_OTP_MODE
+                      ? `Demo OTP for +91 ${phone}: ${demoOtpCode}`
+                      : `Code sent to +91 ${phone}`}
+                  </span>
                   <button
                     type="button"
                     className="text-button"
@@ -415,7 +431,9 @@ export default function LoginPage() {
                   </button>
                 </div>
 
-                <label htmlFor="login-otp">Enter 6-Digit SMS OTP</label>
+                <label htmlFor="login-otp">
+                  Enter 6-Digit {DEMO_OTP_MODE ? "Demo Code" : "SMS OTP"}
+                </label>
                 <input
                   id="login-otp"
                   type="text"
@@ -423,7 +441,9 @@ export default function LoginPage() {
                   autoFocus
                   placeholder="0 0 0 0 0 0"
                   value={otpCode}
-                  onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ""))}
+                  onChange={(e) =>
+                    setOtpCode(e.target.value.replace(/\D/g, ""))
+                  }
                   style={{
                     height: "48px",
                     letterSpacing: "0.25em",
@@ -490,7 +510,7 @@ export default function LoginPage() {
                       onClick={(e) => void handlePhoneSend(e)}
                       disabled={phoneLoading}
                     >
-                      Resend SMS OTP
+                      {DEMO_OTP_MODE ? "Show Demo OTP Again" : "Resend SMS OTP"}
                     </button>
                   )}
                 </div>
@@ -602,4 +622,3 @@ export default function LoginPage() {
     </div>
   )
 }
-

@@ -1,9 +1,4 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-  type FormEvent,
-} from "react"
+import { useEffect, useRef, useState, type FormEvent } from "react"
 import {
   AlertTriangle,
   ArrowRight,
@@ -20,6 +15,7 @@ import {
   Phone,
   PhoneCall,
   PhoneOff,
+  Play,
   Radio,
   RefreshCw,
   ShieldAlert,
@@ -35,19 +31,19 @@ import Transcript from "@/components/call/Transcript"
 import Button from "@/components/ui/Button"
 import Card from "@/components/ui/Card"
 import Toast from "@/components/ui/Toast"
+import { DEMO_OTP_MODE } from "@/config"
 import { useCallAnalysis } from "@/context/CallAnalysisContext"
 import { accountApi } from "@/lib/api"
 import {
+  clearDemoPhoneSession,
   checkPhoneCallAuthorization,
   isAuthorizedPhoneHash,
   sendPhoneOtp,
   verifyPhoneOtp,
 } from "@/lib/auth"
 import { supabase } from "@/lib/supabase"
-import {
-  WebRtcCallSession,
-  type WebRtcStatus,
-} from "@/lib/webrtcService"
+import { analyzeTranscript } from "@/lib/riskEngine"
+import { WebRtcCallSession, type WebRtcStatus } from "@/lib/webrtcService"
 
 interface ConversationTurn {
   id: number
@@ -55,6 +51,33 @@ interface ConversationTurn {
   text: string
   time: string
 }
+
+const safetyDemoTurns = [
+  {
+    speaker: "Bank caller (impersonator)",
+    text: "Hello, I am calling from your bank's KYC department.",
+  },
+  {
+    speaker: "Older woman",
+    text: "I did not expect this call. What should I do?",
+  },
+  {
+    speaker: "Bank caller (impersonator)",
+    text: "Your account will be blocked today unless we verify it right now.",
+  },
+  {
+    speaker: "Older woman",
+    text: "Can I call the number printed on my bank card to check?",
+  },
+  {
+    speaker: "Bank caller (impersonator)",
+    text: "Do not tell anyone or disconnect. Read the OTP sent to your phone.",
+  },
+  {
+    speaker: "Older woman",
+    text: "I will not share any OTP. I am ending this call and contacting my bank using its official number.",
+  },
+]
 
 type AuthStage = "checking" | "phone_input" | "otp_input" | "verified" | "denied"
 
@@ -73,6 +96,9 @@ export default function LivePage() {
   const [verifiedPhoneMasked, setVerifiedPhoneMasked] = useState("")
   const [verifiedPhoneHash, setVerifiedPhoneHash] = useState("")
   const [resendTimer, setResendTimer] = useState(0)
+  const [demoOtpCode, setDemoOtpCode] = useState("")
+  const [safetyDemoTurn, setSafetyDemoTurn] = useState(0)
+  const [isSafetyDemoPlaying, setIsSafetyDemoPlaying] = useState(false)
 
   // Live Call state
   const [roomId, setRoomId] = useState(defaultRoom)
@@ -100,7 +126,8 @@ export default function LivePage() {
   const timerRef = useRef<number | null>(null)
   const callStartedAtRef = useRef<number>(0)
   const turnsRef = useRef<ConversationTurn[]>([])
-  const transcriptChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
+  const transcriptChannelRef =
+    useRef<ReturnType<typeof supabase.channel> | null>(null)
 
   // Initial authorization check
   useEffect(() => {
@@ -135,6 +162,19 @@ export default function LivePage() {
     return () => clearInterval(interval)
   }, [resendTimer])
 
+  useEffect(() => {
+    if (!isSafetyDemoPlaying) return
+    const timer = window.setTimeout(() => {
+      if (safetyDemoTurn + 1 >= safetyDemoTurns.length) {
+        setIsSafetyDemoPlaying(false)
+      }
+      setSafetyDemoTurn((current) =>
+        Math.min(current + 1, safetyDemoTurns.length),
+      )
+    }, 1800)
+    return () => window.clearTimeout(timer)
+  }, [isSafetyDemoPlaying, safetyDemoTurn])
+
   // Keep turns ref synchronized
   useEffect(() => {
     turnsRef.current = turns
@@ -147,7 +187,9 @@ export default function LivePage() {
         callStartedAtRef.current = Date.now()
       }
       timerRef.current = window.setInterval(() => {
-        setCallDuration(Math.floor((Date.now() - callStartedAtRef.current) / 1000))
+        setCallDuration(
+          Math.floor((Date.now() - callStartedAtRef.current) / 1000),
+        )
       }, 1000)
     } else {
       if (timerRef.current) {
@@ -191,7 +233,8 @@ export default function LivePage() {
     if (res.ok) {
       setAuthStage("otp_input")
       setResendTimer(45)
-      setToast("SMS OTP sent! Check your phone.")
+      setDemoOtpCode(res.demoOtp || "")
+      setToast(res.message)
       setTimeout(() => setToast(""), 4000)
     } else {
       setAuthError(res.message)
@@ -242,12 +285,16 @@ export default function LivePage() {
     setProviderDisabled(false)
     setVerifiedPhoneMasked("")
     setVerifiedPhoneHash("")
+    setDemoOtpCode("")
+    clearDemoPhoneSession()
   }
 
   // Start two-way call
   const startCall = async () => {
     if (authStage !== "verified") {
-      setErrorMessage("You must complete Phone OTP verification before joining a call room.")
+      setErrorMessage(
+        "You must complete Phone OTP verification before joining a call room.",
+      )
       return
     }
 
@@ -255,7 +302,8 @@ export default function LivePage() {
     const authCheck = await checkPhoneCallAuthorization()
     if (!authCheck.authorized) {
       setErrorMessage(
-        authCheck.error || "You must complete Phone OTP verification before joining a call room.",
+        authCheck.error ||
+          "You must complete Phone OTP verification before joining a call room.",
       )
       setAuthStage("phone_input")
       return
@@ -272,7 +320,10 @@ export default function LivePage() {
     callStartedAtRef.current = 0
 
     const cleanRoom =
-      roomId.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "") || "falcon-secure-demo"
+      roomId
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]/g, "") || "falcon-secure-demo"
 
     // Setup Transcript Sync via Supabase Realtime broadcast
     setupTranscriptChannel(cleanRoom, authCheck.phoneHash || verifiedPhoneHash)
@@ -339,7 +390,10 @@ export default function LivePage() {
   }
 
   // Setup broadcast channel for syncing transcripts between both mobile phones
-  const setupTranscriptChannel = (roomName: string, activePhoneHash?: string) => {
+  const setupTranscriptChannel = (
+    roomName: string,
+    activePhoneHash?: string,
+  ) => {
     if (transcriptChannelRef.current) {
       void transcriptChannelRef.current.unsubscribe()
     }
@@ -375,6 +429,9 @@ export default function LivePage() {
     const Recognition =
       window.SpeechRecognition ?? window.webkitSpeechRecognition
     if (!Recognition) {
+      setErrorMessage(
+        "Live speech recognition is not supported in this browser. Try the latest Chrome on Android for real-time transcript and risk analysis.",
+      )
       return
     }
 
@@ -414,7 +471,9 @@ export default function LivePage() {
 
       recognition.onerror = (event) => {
         if (event.error !== "no-speech") {
-          console.warn("Speech recognition warning:", event.error)
+          setErrorMessage(
+            `Speech recognition stopped (${event.error}). Check microphone permission and keep the page active.`,
+          )
         }
       }
 
@@ -488,7 +547,9 @@ export default function LivePage() {
       setToast(result.message)
     } catch (error) {
       setToast(
-        error instanceof Error ? error.message : "Could not alert your contact.",
+        error instanceof Error
+          ? error.message
+          : "Could not alert your contact.",
       )
     }
     setTimeout(() => setToast(""), 4200)
@@ -527,7 +588,8 @@ export default function LivePage() {
             Live Call
           </h1>
           <p>
-            Real-time peer-to-peer audio call with live speech recognition and instant scam detection.
+            Real-time peer-to-peer audio call with live speech recognition and
+            instant scam detection.
           </p>
         </div>
         <button
@@ -548,10 +610,16 @@ export default function LivePage() {
               <Smartphone aria-hidden="true" />
             </span>
             <div>
-              <span className="section-kicker">SMS OTP AUTHENTICATION</span>
+              <span className="section-kicker">
+                {DEMO_OTP_MODE
+                  ? "LOCAL DEMO VERIFICATION"
+                  : "SMS OTP AUTHENTICATION"}
+              </span>
               <h2>Team Participant Verification</h2>
               <p>
-                Access to private call rooms and real-time fraud analysis requires phone OTP verification for authorized team members.
+                {DEMO_OTP_MODE
+                  ? "Use the displayed demo code with either authorized team phone number to unlock the call room."
+                  : "Access to private call rooms and real-time fraud analysis requires phone OTP verification for authorized team members."}
               </p>
             </div>
           </div>
@@ -588,20 +656,37 @@ export default function LivePage() {
               {providerDisabled && (
                 <div className="provider-disabled-notice">
                   <div className="provider-notice-title">
-                    <ShieldAlert aria-hidden="true" /> Supabase Phone Auth Not Configured
+                    <ShieldAlert aria-hidden="true" /> Supabase Phone Auth Not
+                    Configured
                   </div>
                   <p>
-                    Supabase returned <code>phone_provider_disabled</code>. To send real SMS OTPs to your phone:
+                    Supabase returned <code>phone_provider_disabled</code>. To
+                    send real SMS OTPs to your phone:
                   </p>
                   <ol>
-                    <li>Open your Supabase Dashboard for project <code>yzmnywwhkyjwkjkgpoev</code>.</li>
-                    <li>Navigate to <strong>Authentication</strong> &rarr; <strong>Providers</strong> &rarr; <strong>Phone</strong>.</li>
-                    <li>Toggle <strong>Enable Phone Provider</strong> to ON.</li>
-                    <li>Select an SMS Provider (e.g. <strong>Twilio</strong>, <strong>MessageBird</strong>, or <strong>Vonage</strong>) and add your API credentials.</li>
-                    <li>Click <strong>Save</strong>.</li>
+                    <li>
+                      Open your Supabase Dashboard for project{" "}
+                      <code>yzmnywwhkyjwkjkgpoev</code>.
+                    </li>
+                    <li>
+                      Navigate to <strong>Authentication</strong> &rarr;{" "}
+                      <strong>Providers</strong> &rarr; <strong>Phone</strong>.
+                    </li>
+                    <li>
+                      Toggle <strong>Enable Phone Provider</strong> to ON.
+                    </li>
+                    <li>
+                      Select an SMS Provider (e.g. <strong>Twilio</strong>,{" "}
+                      <strong>MessageBird</strong>, or <strong>Vonage</strong>)
+                      and add your API credentials.
+                    </li>
+                    <li>
+                      Click <strong>Save</strong>.
+                    </li>
                   </ol>
                   <small>
-                    Once enabled, live SMS OTP verification will deliver directly to your phone.
+                    Once enabled, live SMS OTP verification will deliver
+                    directly to your phone.
                   </small>
                 </div>
               )}
@@ -612,7 +697,11 @@ export default function LivePage() {
                 icon={<ArrowRight aria-hidden="true" />}
                 disabled={authLoading}
               >
-                {authLoading ? "Sending SMS OTP..." : "Send SMS OTP"}
+                {authLoading
+                  ? "Preparing..."
+                  : DEMO_OTP_MODE
+                    ? "Show Demo OTP"
+                    : "Send SMS OTP"}
               </Button>
             </form>
           )}
@@ -620,7 +709,11 @@ export default function LivePage() {
           {authStage === "otp_input" && (
             <form onSubmit={handleVerifyOtp} className="phone-auth-form">
               <div className="otp-sent-info">
-                <span>Verification code sent to your phone.</span>
+                <span>
+                  {DEMO_OTP_MODE
+                    ? `Demo OTP for +91 ${phoneNumber}: ${demoOtpCode}`
+                    : `OTP requested for +91 ${phoneNumber}. Delivery is not confirmed.`}
+                </span>
                 <button
                   type="button"
                   className="text-btn"
@@ -630,7 +723,9 @@ export default function LivePage() {
                 </button>
               </div>
 
-              <label htmlFor="otp-input">Enter 6-Digit SMS OTP</label>
+              <label htmlFor="otp-input">
+                Enter 6-Digit {DEMO_OTP_MODE ? "Demo Code" : "SMS OTP"}
+              </label>
               <input
                 id="otp-input"
                 type="text"
@@ -655,7 +750,9 @@ export default function LivePage() {
                 icon={<KeyRound aria-hidden="true" />}
                 disabled={authLoading || otpCode.length < 6}
               >
-                {authLoading ? "Verifying Token..." : "Verify & Unlock Call Room"}
+                {authLoading
+                  ? "Verifying Token..."
+                  : "Verify & Unlock Call Room"}
               </Button>
 
               <div className="otp-resend-row">
@@ -668,7 +765,7 @@ export default function LivePage() {
                     onClick={() => void handleSendOtp()}
                     disabled={authLoading}
                   >
-                    Resend SMS OTP
+                    {DEMO_OTP_MODE ? "Show Demo OTP Again" : "Resend SMS OTP"}
                   </button>
                 )}
               </div>
@@ -681,7 +778,9 @@ export default function LivePage() {
               <div>
                 <h3>Access Denied</h3>
                 <p>
-                  This phone number has been verified via OTP, but it is <strong>not on the authorized team member allowlist</strong> for live call sessions.
+                  This phone number has been verified via OTP, but it is{" "}
+                  <strong>not on the authorized team member allowlist</strong>{" "}
+                  for live call sessions.
                 </p>
                 <Button
                   variant="secondary"
@@ -704,7 +803,8 @@ export default function LivePage() {
             <div className="verified-left">
               <ShieldCheck aria-hidden="true" />
               <span>
-                Verified Team Participant <strong>({verifiedPhoneMasked})</strong>
+                Verified Team Participant{" "}
+                <strong>({verifiedPhoneMasked})</strong>
               </span>
             </div>
             <button
@@ -731,14 +831,17 @@ export default function LivePage() {
                 </div>
                 <h2>Immediate Safety Warning</h2>
                 <p className="fraud-alert-advisory">
-                  <strong>CRITICAL:</strong> Do NOT disclose any OTP, UPI PIN, password, or banking information. Do NOT approve any payment or fund transfer request.
+                  <strong>CRITICAL:</strong> Do NOT disclose any OTP, UPI PIN,
+                  password, or banking information. Do NOT approve any payment
+                  or fund transfer request.
                 </p>
-                {analysis.matchedPhrases && analysis.matchedPhrases.length > 0 && (
-                  <div className="fraud-detected-phrase">
-                    <span>Suspicious phrase heard:</span>
-                    <mark>"{analysis.matchedPhrases[0]}"</mark>
-                  </div>
-                )}
+                {analysis.matchedPhrases &&
+                  analysis.matchedPhrases.length > 0 && (
+                    <div className="fraud-detected-phrase">
+                      <span>Suspicious phrase heard:</span>
+                      <mark>"{analysis.matchedPhrases[0]}"</mark>
+                    </div>
+                  )}
                 <div className="fraud-alert-meta">
                   <span>
                     Risk Classification:{" "}
@@ -788,10 +891,8 @@ export default function LivePage() {
                       "Requesting Microphone..."}
                     {status === "waiting_for_peer" &&
                       "Waiting for Other Phone..."}
-                    {status === "connecting" &&
-                      "Establishing WebRTC Peer..."}
-                    {status === "connected" &&
-                      "Connected (Live Two-Way Audio)"}
+                    {status === "connecting" && "Establishing WebRTC Peer..."}
+                    {status === "connected" && "Connected (Live Two-Way Audio)"}
                     {status === "disconnected" && "Connection Interrupted"}
                     {status === "failed" && "Connection Failed"}
                     {status === "ended" && "Call Ended"}
@@ -884,18 +985,14 @@ export default function LivePage() {
                       <Volume2 aria-hidden="true" />
                       <span>Remote Peer Audio</span>
                       <strong>
-                        {status === "connected"
-                          ? `${remoteLevel}%`
-                          : "Waiting"}
+                        {status === "connected" ? `${remoteLevel}%` : "Waiting"}
                       </strong>
                     </div>
                     <div className="meter-bar-track">
                       <div
                         className="meter-bar-fill remote"
                         style={{
-                          width: `${
-                            status === "connected" ? remoteLevel : 0
-                          }%`,
+                          width: `${status === "connected" ? remoteLevel : 0}%`,
                         }}
                       />
                     </div>
@@ -1002,6 +1099,96 @@ export default function LivePage() {
                     <p>{analysis.explanation}</p>
                   </div>
                 </div>
+              )}
+            </Card>
+          </section>
+
+          <section className="safety-demo-section" aria-labelledby="safety-demo-title">
+            <Card className="tactics-card">
+              <div className="section-heading compact">
+                <span className="section-icon">
+                  <ShieldAlert aria-hidden="true" />
+                </span>
+                <div>
+                  <h2 id="safety-demo-title">Safety demo: suspicious bank call</h2>
+                  <p>
+                    A scripted example showing how pressure and OTP requests
+                    trigger an alert. This does not join or record your live call.
+                  </p>
+                </div>
+              </div>
+
+              <div className="call-actions-row">
+                <Button
+                  variant="secondary"
+                  icon={<Play aria-hidden="true" />}
+                  onClick={() => {
+                    if (isSafetyDemoPlaying) {
+                      setIsSafetyDemoPlaying(false)
+                    } else {
+                      if (safetyDemoTurn >= safetyDemoTurns.length) {
+                        setSafetyDemoTurn(0)
+                      }
+                      setIsSafetyDemoPlaying(true)
+                    }
+                  }}
+                >
+                  {isSafetyDemoPlaying
+                    ? "Pause safety demo"
+                    : safetyDemoTurn >= safetyDemoTurns.length
+                      ? "Replay safety demo"
+                      : "Play safety demo"}
+                </Button>
+                {safetyDemoTurn > 0 && !isSafetyDemoPlaying && (
+                  <button
+                    type="button"
+                    className="text-btn"
+                    onClick={() => setSafetyDemoTurn(0)}
+                  >
+                    Reset demo
+                  </button>
+                )}
+              </div>
+
+              {safetyDemoTurn > 0 && (
+                <>
+                  <div className="transcript-stream" aria-live="polite">
+                    {safetyDemoTurns.slice(0, safetyDemoTurn).map((turn, index) => (
+                      <div className="transcript-line" key={`${turn.speaker}-${index}`}>
+                        <time>{`00:${String((index + 1) * 3).padStart(2, "0")}`}</time>
+                        <p>
+                          <strong className="transcript-speaker">
+                            {turn.speaker}:{" "}
+                          </strong>
+                          {turn.text}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {(() => {
+                    const demoAnalysis = analyzeTranscript(
+                      safetyDemoTurns
+                        .slice(0, safetyDemoTurn)
+                        .map((turn) => turn.text)
+                        .join(" "),
+                    )
+                    return (
+                      <div
+                        className={`live-risk-summary risk-${demoAnalysis.level}`}
+                        role="status"
+                        aria-live="polite"
+                      >
+                        <span>
+                          {demoAnalysis.level === "high"
+                            ? "HIGH RISK — do not share OTPs or personal details"
+                            : "Analyzing scripted conversation"}
+                        </span>
+                        <strong>{demoAnalysis.score}% risk</strong>
+                      </div>
+                    )
+                  })()}
+                </>
               )}
             </Card>
           </section>
